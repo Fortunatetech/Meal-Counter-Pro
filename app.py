@@ -155,13 +155,13 @@ class MealCounter:
 st.markdown("""
     <style>
     .main-header {
-        font-size: 10.5rem;      /* Changed from 2.5rem */
+        font-size: 5.5rem;      /* Changed from 2.5rem */
         font-weight: 700;
         color: #1f77b4;
         margin-bottom: 0.5rem;
     }
     .sub-header {
-        font-size: 3.8rem;      /* Changed from 1.2rem */
+        font-size: 2.8rem;      /* Changed from 1.2rem */
         color: #666;
         margin-bottom: 2rem;
     }
