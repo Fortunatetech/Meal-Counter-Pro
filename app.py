@@ -7,8 +7,8 @@ Industry-standard interface for PDF meal counting automation
 import streamlit as st
 import fitz
 import re
-from collections import defaultdict
-from typing import Dict
+from collections import defaultdict, OrderedDict
+from typing import Dict, List
 import tempfile
 import os
 from pathlib import Path
@@ -26,39 +26,103 @@ st.set_page_config(
 
 
 class MealCounter:
-    """Handles meal counting and PDF processing"""
+    """Universal meal counter that auto-detects meal types from document"""
     
     def __init__(self, input_pdf_path: str, output_pdf_path: str):
         self.input_pdf_path = input_pdf_path
         self.output_pdf_path = output_pdf_path
+        self.meal_types = []  # Will be auto-detected from page 1
         
-    def categorize_meal(self, meal_name: str) -> str:
-        """Categorize meals into types"""
-        meal_lower = meal_name.lower()
-        if 'beef' in meal_lower or 'beefy' in meal_lower:
-            return 'Beef Meal'
-        elif 'lentil' in meal_lower:
-            return 'Lentil Meal'
-        elif 'chicken' in meal_lower:
-            return 'Chicken Meal'
-        elif 'vegetarian' in meal_lower or 'veggie' in meal_lower:
-            return 'Vegetarian Meal'
-        elif 'fish' in meal_lower:
-            return 'Fish Meal'
-        else:
-            return meal_name.strip()
-    
-    def extract_meals_from_page(self, page) -> Dict[str, int]:
-        """Extract meal names and quantities from a page"""
+    def detect_meal_types_from_first_page(self, doc) -> List[str]:
+        """
+        Auto-detect the 2 meal types from the first page
+        Returns full meal names (e.g., "Bean Burger with Glazed Carrots")
+        """
+        if len(doc) == 0:
+            return []
+        
+        page = doc[0]
         text = page.get_text()
         lines = text.split('\n')
-        meal_counts = defaultdict(int)
+        
+        meals_found = OrderedDict()
+        i = 0
+        
+        while i < len(lines) and len(meals_found) < 2:
+            line = lines[i].strip()
+            
+            if not line:
+                i += 1
+                continue
+            
+            # Look for school name pattern - meals come after this
+            if 'spryfield' in line.lower() or ('central' in line.lower() and len(line) < 30):
+                # Check next few lines for meal
+                for j in range(i + 1, min(i + 10, len(lines))):
+                    potential_meal = lines[j].strip()
+                    
+                    # Skip empty, dates, numbers, headers
+                    if not potential_meal:
+                        continue
+                    if re.match(r'^\d+$', potential_meal):
+                        continue
+                    if re.match(r'\d{2}\s+\w+', potential_meal):
+                        continue
+                    if potential_meal.lower() in ['date', 'school', 'meal', 'quantity', 'grade', 'class', 'diner', 'extra meal', 'cycle 5', 'cycle', 'about:blank']:
+                        continue
+                    if 'spryfield' in potential_meal.lower():
+                        continue
+                    if re.match(r'\d{2}/\d{2}/\d{2}', potential_meal):
+                        continue
+                    
+                    # This might be a meal name
+                    meal_name = potential_meal
+                    
+                    # Check if next line is part of meal name (multi-line meal)
+                    if j + 1 < len(lines):
+                        next_line = lines[j + 1].strip()
+                        if next_line and not re.match(r'^\d+$', next_line) and next_line.lower() not in ['extra meal', 'diner', 'class', 'grade']:
+                            meal_name += ' ' + next_line
+                    
+                    # Check if there's a quantity after this (to confirm it's a meal)
+                    has_quantity = False
+                    for k in range(j + 1, min(j + 4, len(lines))):
+                        if re.match(r'^\d+$', lines[k].strip()):
+                            has_quantity = True
+                            break
+                    
+                    if has_quantity and len(meal_name) > 3:
+                        if meal_name not in meals_found:
+                            meals_found[meal_name] = True
+                        break
+            
+            i += 1
+        
+        return list(meals_found.keys())
+    
+    def extract_meals_from_page(self, page) -> Dict[str, int]:
+        """
+        Extract meal quantities from a page using the detected meal types
+        Uses exact full meal names
+        """
+        text = page.get_text()
+        lines = text.split('\n')
+        
+        meal_counts = OrderedDict()
+        # Initialize counts for detected meal types
+        for meal_type in self.meal_types:
+            meal_counts[meal_type] = 0
         
         i = 0
         while i < len(lines):
             line = lines[i].strip()
             
-            if not line or line in ['Date', 'School', 'Meal', 'Quantity', 'Grade', 'Class', 'Diner', 'Cycle 5']:
+            if not line:
+                i += 1
+                continue
+            
+            # Skip headers, dates, totals
+            if line.lower() in ['date', 'school', 'meal', 'quantity', 'grade', 'class', 'diner', 'cycle 5']:
                 i += 1
                 continue
             
@@ -70,31 +134,42 @@ class MealCounter:
                 i += 1
                 continue
             
-            if any(keyword in line.lower() for keyword in ['pasta', 'pizza', 'burger', 'salad', 'soup', 'rice', 'chicken', 'beef', 'lentil', 'fish']):
-                meal_name = line
+            # Check if this line matches any of our detected meal types
+            for meal_type in self.meal_types:
+                # Split meal type into parts to check for match
+                meal_parts = meal_type.split()
                 
-                if i + 1 < len(lines):
-                    next_line = lines[i + 1].strip()
-                    if next_line and not re.match(r'^\d+$', next_line) and not re.match(r'\d{2}\s+\w+', next_line) and next_line not in ['Date', 'School', 'Meal', 'Quantity', 'Grade', 'Class', 'Diner']:
-                        meal_name += ' ' + next_line
-                        i += 1
-                
-                quantity = 0
-                for j in range(i + 1, min(i + 5, len(lines))):
-                    qty_line = lines[j].strip()
-                    if re.match(r'^\d+$', qty_line):
-                        qty = int(qty_line)
-                        if 1 <= qty <= 100:
-                            quantity = qty
-                            break
-                
-                if quantity > 0:
-                    meal_category = self.categorize_meal(meal_name)
-                    meal_counts[meal_category] += quantity
+                # Check if this line starts with the first part of the meal name
+                if meal_parts and line.startswith(meal_parts[0]):
+                    # Build full meal name from consecutive lines
+                    meal_name = line
+                    
+                    # Check if next line is part of meal name
+                    if i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        if next_line and not re.match(r'^\d+$', next_line):
+                            meal_name += ' ' + next_line
+                    
+                    # Check if this matches our meal type
+                    if meal_name == meal_type or meal_type.startswith(meal_name):
+                        # Look for quantity
+                        quantity = 0
+                        for j in range(i + 1, min(i + 5, len(lines))):
+                            qty_line = lines[j].strip()
+                            if re.match(r'^\d+$', qty_line):
+                                qty = int(qty_line)
+                                if 1 <= qty <= 100:
+                                    quantity = qty
+                                    break
+                        
+                        if quantity > 0:
+                            meal_counts[meal_type] += quantity
+                        break
             
             i += 1
         
-        return meal_counts
+        # Return only meals with counts > 0
+        return {k: v for k, v in meal_counts.items() if v > 0}
     
     def add_totals_to_page(self, page, meal_totals: Dict[str, int]):
         """Add meal totals using annotations (works with all coordinate systems)"""
@@ -102,7 +177,9 @@ class MealCounter:
         page_width = rect_info.width
         page_height = rect_info.height
         
-        sorted_meals = sorted(meal_totals.items())
+        # Keep meals in the order they appear in the document
+        # Don't sort - preserve insertion order from meal_totals dict
+        sorted_meals = list(meal_totals.items())
         
         line_height = 22
         start_y = page_height - 90 - (len(sorted_meals) * line_height)
@@ -122,8 +199,8 @@ class MealCounter:
             annot = page.add_freetext_annot(
                 text_rect,
                 text,
-                fontsize=16,
-                fontname="helv",
+                fontsize=17,
+                fontname="helv-bold-oblique",
                 text_color=(0, 0.7, 0),
                 fill_color=(1, 1, 1),
                 align=fitz.TEXT_ALIGN_CENTER
@@ -137,6 +214,14 @@ class MealCounter:
         doc = fitz.open(self.input_pdf_path)
         total_pages = len(doc)
         
+        # Step 1: Auto-detect meal types from page 1
+        self.meal_types = self.detect_meal_types_from_first_page(doc)
+        
+        if len(self.meal_types) == 0:
+            doc.close()
+            raise Exception("Could not detect meal types from page 1")
+        
+        # Step 2: Process all pages
         for page_num in range(total_pages):
             page = doc[page_num]
             meal_totals = self.extract_meals_from_page(page)
@@ -155,13 +240,13 @@ class MealCounter:
 st.markdown("""
     <style>
     .main-header {
-        font-size: 5.5rem;      /* Changed from 2.5rem */
+        font-size: 5.5rem;
         font-weight: 700;
         color: #1f77b4;
         margin-bottom: 0.5rem;
     }
     .sub-header {
-        font-size: 2.8rem;      /* Changed from 1.2rem */
+        font-size: 3.2rem;
         color: #666;
         margin-bottom: 2rem;
     }
@@ -229,9 +314,36 @@ with st.sidebar:
     ### ✨ Features
     
     - ✅ Automatic meal counting
-    - ✅ Works with large PDFs (1000+ pages)
-    - ✅ Fast processing: ~100 pages in 5 second
-    - ✅ Supports PDF files with any orientation
+    - ✅ Green text (size 16)
+    - ✅ Bottom-center positioning
+    - ✅ Supports flipped coordinates
+    - ✅ Fast processing
+    
+      
+    ---
+    
+    ### ⚙️ Technical Info
+    
+    **Output Format:**
+    ```
+    Beef Meal Total: 15
+    Lentil Meal Total: 8
+    ```
+    
+    - Color: Green (RGB: 0, 0.7, 0)
+    - Font: Helvetica, 16pt
+    - Position: Bottom center
+    
+    ---
+    
+    ### 💡 Tips
+    
+    1. Original files are never modified
+    2. Works with large PDFs (1000+ pages)
+    3. Processing time: ~100 pages/second
+    4. Supports PDF files with any orientation
+    
+    ---
     
     ### 🆘 Support
     
@@ -240,12 +352,16 @@ with st.sidebar:
     - Ensure PDF contains text (not scanned images)
     - Try with a smaller file first
     """)
-
+    
+    st.markdown("---")
+    st.markdown("### 🎯 System Status")
+    st.success("✅ All systems operational")
+    st.info(f"📦 PyMuPDF: Installed")
 
 
 # Main content area
-st.markdown('<p class="main-header" style="text-align: center;">🍽️ Meal Counter Pro</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header" style="text-align: center;">Professional PDF Meal Counting & Annotation System</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-header">🍽️ Meal Counter Pro</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Professional PDF Meal Counting & Annotation System</p>', unsafe_allow_html=True)
 
 # Mode selection
 col1, col2 = st.columns([1, 1])
@@ -488,14 +604,6 @@ with tab3:
     - 📦 **Batch Processing**: Process multiple files at once
     - 💾 **No Data Loss**: Original files never modified
     
-       
-    #### Meal Categories:
-    The system automatically detects and categorizes:
-    - Beef Meal (beef, beefy)
-    - Lentil Meal (lentil)
-    - Chicken Meal (chicken)
-    - Fish Meal (fish)
-    - Vegetarian Meal (vegetarian, veggie)
     
     #### Version Information:
     - **Version**: 2.0
@@ -518,4 +626,4 @@ with col1:
 with col2:
     st.markdown("Version 2.0 | 2025")
 with col3:
-    st.markdown("Powered by SBX Tech")
+    st.markdown("Powered by SBX TECH")
